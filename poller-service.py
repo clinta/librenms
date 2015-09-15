@@ -34,7 +34,6 @@ import logging
 import logging.handlers
 from datetime import datetime, timedelta
 from collections import namedtuple
-import Queue
 
 log = logging.getLogger('poller-service')
 log.setLevel(logging.DEBUG)
@@ -245,32 +244,27 @@ dev_query = ('SELECT device_id, status,                                         
              'FROM devices WHERE                                                 '
              'disabled = 0                                                       '
              'AND IS_FREE_LOCK(CONCAT("poll.", device_id))                       '
-             'AND IS_FREE_LOCK(CONCAT("discovery.", device_id))                  '
-             'AND IS_FREE_LOCK(CONCAT("queue.", device_id))                      '
+             'AND IS_FREE_LOCK(CONCAT("discovery.", device_id))                       '
+             'AND IS_FREE_LOCK(CONCAT("queue.", device_id))                       '
              'AND ( last_poll_attempted < DATE_SUB(NOW(), INTERVAL {2} SECOND )  '
              '  OR last_poll_attempted IS NULL )                                 '
              '{3}                                                                '
              'ORDER BY next_poll asc                                             '
-             'LIMIT {4}                                                          ').format(poll_frequency,
+             'LIMIT 1                                                            ').format(poll_frequency,
                                                                                            discover_frequency,
                                                                                            down_retry,
-                                                                                           poller_group,
-                                                                                           amount_of_workers)
-
+                                                                                           poller_group)
 
 next_update = datetime.now() + timedelta(minutes=1)
 devices_scanned = 0
 
 dont_query_until = datetime.fromtimestamp(0)
 
-dev_queue = Queue.Queue()
-
 def poll_worker():
     global dev_query
     global devices_scanned
     global dont_query_until
     global single_connection
-    global dev_queue
     thread_id = threading.current_thread().name
 
     if single_connection:
@@ -279,20 +273,17 @@ def poll_worker():
         db = DB()
 
     while True:
+        if datetime.now() < dont_query_until:
+            time.sleep(1)
+            continue
 
-        try:
-            dev_row = dev_queue.get(False)
-        except Queue.Empty:
-            if datetime.now() < dont_query_until:
-                time.sleep(1)
-                continue
+        dev_row = db.query(dev_query)
+        if len(dev_row) < 1:
             dont_query_until = datetime.now() + timedelta(seconds=retry_query)
-            for query_row in db.query(dev_query):
-                dev_queue.put(query_row)
+            time.sleep(1)
             continue
             
-        log.debug('DEBUG: Thread {0} dev_queue has {1} devices'.format(thread_id, dev_queue.qsize()))
-        device_id, status, next_poll, next_discovery  = dev_row
+        device_id, status, next_poll, next_discovery  = dev_row[0]
 
         if not getLock('queue.{0}'.format(device_id), db):
             releaseLock('queue.{0}'.format(device_id), db)
